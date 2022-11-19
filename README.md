@@ -32,7 +32,7 @@ void *m = // {memory mapped location or memory mapped with file backing}
 size m_length = <whatever>;
 
 // create the fixed allocator
-struct fmem* fm = fmem_create_new(m, m_length, 0 /* defaults each allocation to whatever allocator have */ )
+struct fmem* fm = fmem_create_new(m, m_length, 0 /* defaults each allocation to whatever allocator have */ );
 
 if (fm < 0) /* error */ all our errors are returned as negative values
 
@@ -53,8 +53,11 @@ struct fmem *fm = fmem_from_existing(m); // if mem checks enabled and memory wsa
 // get reference to our stashed index
 struct some *s = (struct some *) fm->user1;
 
+// memory can be freed by
+fmem_free(fm, my_mem);
+
 ```
 
 
 ## Other Samples
-TODO
+TODO (code samples runnable in the repo itself).

@@ -36,6 +36,14 @@ struct fmem{
 	size_t total_available;
 	uint32_t alloc_objects; // pages in use
 	uint32_t min_alloc;
+	// this where user can stash a root pointer to thier own data
+	// we never touch these data. we went with 4 parts data assuming
+	// it should cover most usecases without have to get the caller
+	// to build thier own index of root pointers.
+	void *user1;
+	void *user2;
+	void *user3;
+	void *user4;
 };
 
 // we can not really operate on less than that

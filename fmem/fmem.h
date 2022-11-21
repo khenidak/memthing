@@ -36,6 +36,7 @@ struct fmem{
 	size_t total_available;
 	uint32_t alloc_objects; // pages in use
 	uint32_t min_alloc;
+	uint32_t lock; // spin lock
 	// this where user can stash a root pointer to thier own data
 	// we never touch these data. we went with 4 parts data assuming
 	// it should cover most usecases without have to get the caller

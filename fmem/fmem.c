@@ -137,14 +137,21 @@ static inline struct fmem_page* fpage_from_mem(void *mem){
 }
 
 
+static inline bool atomic_compare_swap(uint32_t * ptr, uint32_t compare, uint32_t exchange) {
+	return __atomic_compare_exchange_n(ptr, &compare, exchange,	0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
 // spin lock style locking mechnasim, we have only one lock
+// we are trying to minimize deps so we are not trying to link
+// to pthread
 static void inline fmem_lock(struct fmem *fm){
-  // TODO
+	 while(!atomic_compare_swap(&fm->lock, 0, 1)) {
+						}
 }
 
 
 static void inline fmem_unlock(struct fmem *fm){
-  // TODO
+	 __atomic_store_n(&fm->lock, 0, __ATOMIC_SEQ_CST);
 }
 
 // creates an allocator on preallocated memory. The allocator uses the entire length of memory
@@ -196,12 +203,13 @@ static struct fmem* fmem_from_existing(void * on_mem){
 
 static void* fmem_alloc(struct fmem *fm, uint32_t size){
   void* ret = NULL;
+  struct fmem_page *selected = NULL;
   uint32_t adjusted_alloc = size < fm->min_alloc ? fm->min_alloc : size;
 
   fmem_lock(fm);
-  if (fm->total_available < adjusted_alloc) return (void *) FMEM_E_NOMEM; // do we have enough available?, note
-                                                                          // we may do but it will require carving which
-                                                                          // we won't be able to tell until we iterate
+  if (fm->total_available < adjusted_alloc) {
+					goto done;
+		}
 
   // TODO
   // 1- bad mem checks
@@ -215,7 +223,6 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
   //  we can get clever by maintain a cache of free pages but that will be later on
     // get head page
   struct fmem_page *head_page = fpage_from_mem(fm); // this the page that holds our accounting object. We don't iterate over it
-  struct fmem_page *selected = NULL;
   struct list_head *head = &head_page->list;
   struct list_head *current = head;
   list_for_each(current, head){

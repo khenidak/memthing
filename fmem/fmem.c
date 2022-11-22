@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "list/list.h"
 #include "fmem.h"
@@ -154,6 +155,27 @@ static void inline fmem_unlock(struct fmem *fm){
 	 __atomic_store_n(&fm->lock, 0, __ATOMIC_SEQ_CST);
 }
 
+static inline int64_t fail_on_poison_check(uint16_t poison, uint16_t expected, char* message){
+#if defined(__UNIT_TESTING__) && defined(__BAD_MEM__)
+	// used only during unit testing
+	if(poison != expected){
+		return EE_BAD_MEM;
+	}
+#endif
+
+#if !defined(__UNIT_TESTING__) && defined(__BAD_MEM__)
+	if if(poison != expected){
+		// runtime mode. we need to exit. This should - hopefully - be detected in integration testing
+		printf("******************* WARNING! WARNING!*********************");
+		printf("memory corruption detected on: %s", message);
+		printf("**********************************************************");
+		exit(2);
+	}
+#endif
+
+	return 0;
+}
+
 // creates an allocator on preallocated memory. The allocator uses the entire length of memory
 static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc){
   if(length < MIN_TOTAL_ALLOCATION) return (void *) E_TOTAL_ALLOCATION_SIZE_TOO_SMALL;
@@ -194,11 +216,16 @@ static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_a
 
 // gets a reference to an existing allocator occupying on_mem memory
 static struct fmem* fmem_from_existing(void * on_mem){
-  // TODO POISON CHECKS
-  //
   // our accounting object is stashed in head page
   struct fmem_page *fpage_head = (struct fmem_page *) on_mem;
-  return (struct fmem *) mem_from_fpage(fpage_head);
+
+	int64_t check = fail_on_poison_check(fpage_get_magic(fpage_head), POISON, "reloading existing allocator (head page)");
+	if( check != 0) return  ((struct fmem *) check);
+
+
+	struct fmem *fm = (struct fmem *) mem_from_fpage(fpage_head);
+
+  return fm;
 }
 
 static void* fmem_alloc(struct fmem *fm, uint32_t size){
@@ -210,10 +237,6 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
   if (fm->total_available < adjusted_alloc) {
 					goto done;
 		}
-
-  // TODO
-  // 1- bad mem checks
-  // 2- memory move checks
 
   // carving pages always carve towards the end of the page
   // meaning: our free pages are always closer(on the right) to head. this result into:
@@ -227,6 +250,14 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
   struct list_head *current = head;
   list_for_each(current, head){
     struct fmem_page *this_page = list_entry(current, struct fmem_page, list);
+
+		// check for corruption
+		int64_t check = fail_on_poison_check(fpage_get_magic(this_page), POISON, "iterating and checking mem pages");
+		if( check != 0){
+					 ret = (void *)	check;
+					 goto done;
+		}
+
     if (false == fpage_is_free(this_page)) continue; // can't work with a page in use
     int fit_status = fpage_can_fit(this_page, adjusted_alloc);
     switch(fit_status){
@@ -258,11 +289,16 @@ done:
   return ret == NULL ? (void *)FMEM_E_NOMEM : ret;
 }
 
-// frees a memory and returns total freed memory (includes page overhead, which will also be returned to bool)
+// frees a memory and returns total freed memory (includes page overhead, which will also be returned to pool)
 // BAD_MEM is tested for this one
-static int32_t fmem_free(struct fmem *fm, void *mem){
+static int64_t fmem_free(struct fmem *fm, void *mem){
   // TODO  bad mem
   struct fmem_page *fpage = fpage_from_mem(mem); // get the page for that mem. page is always stashed before the mem
+
+	// POISON CHECK
+	int64_t check = fail_on_poison_check(fpage_get_magic(fpage), POISON, "reloading existing allocator");
+	if( check != 0) return check;
+
 
   fmem_lock(fm);
 
@@ -307,6 +343,52 @@ static int count_pages(struct fmem_page *fpage){
   // because our iterators does not like working with head
   return count+1;
 }
+
+static MunitResult test_fmem_poison(const MunitParameter params[], void* data){
+    // test that small buffers are not welcomed
+    char buffer[large_buffer_size] = {0};
+    struct fmem *original_fm = fmem_create_new(buffer, large_buffer_size, 0);
+		munit_assert(original_fm > 0);
+
+		// corrupt head page
+    // this also checks the correct stashing of our accounting object
+    struct fmem_page *head_page = fpage_from_mem(original_fm);
+		fpage_set_magic(head_page,0);
+
+		// reuse it
+		struct fmem *reused = fmem_from_existing(buffer);
+		munit_assert(EE_BAD_MEM == (int64_t) reused);
+
+		// reset to fix it.
+		original_fm = fmem_create_new(buffer, large_buffer_size, 0);
+		head_page = fpage_from_mem(original_fm);
+		// we know that there is two pages, lets mess up the second on
+    struct fmem_page *main_page = list_entry(head_page->list.next, struct fmem_page, list);
+		fpage_set_magic(main_page, 0);
+
+		void *mem = fmem_alloc(original_fm, large_buffer_size /2);
+	 	munit_assert(EE_BAD_MEM == (int64_t) mem);
+
+		return MUNIT_OK;
+}
+
+static MunitResult test_fmem_free_poison(const MunitParameter params[], void* data){
+    char buffer[large_buffer_size] = {0};
+    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, PAGE_OVERHEAD);
+    munit_assert(fm > 0);
+
+    // alloc one
+    void* mem = NULL;
+    mem = fmem_alloc(fm, PAGE_OVERHEAD);
+    munit_assert(mem != NULL && mem > 0);
+
+		// lets mess it up
+		struct fmem_page *fpage = fpage_from_mem(mem);
+		fpage_set_magic(fpage, 0);// invalidates the magic
+		munit_assert(fmem_free(fm, mem) == EE_BAD_MEM);
+		return MUNIT_OK;
+}
+
 
 static MunitResult test_fmem_alloc_fails(const MunitParameter params[], void* data){
     char buffer[large_buffer_size] = {0};
@@ -404,7 +486,6 @@ static MunitResult test_fmem_creation(const MunitParameter params[], void* data)
     // check that create frome existing work as expected
     struct fmem *fm_other = fmem_from_existing(buffer);
     munit_assert(fm_other == fm);
-    // TODO bad mem check for from existing case
 
     // test that large min allocs are respected
     struct fmem *fm_large_alloc =  fmem_create_new(buffer, large_buffer_size, 5 * sizeof(struct fmem_page));
@@ -745,6 +826,10 @@ MunitTest fmem_tests[] = {
   {"/fmem-creation", test_fmem_creation, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/fmem-simple-alloc-free", test_fmem_alloc_free_simple, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/fmem-simple-alloc-fails", test_fmem_alloc_fails, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+	// poison tests
+	{"/fmem-all-free-poison", test_fmem_free_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+	{"/fmem-reuse-poison", test_fmem_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+
   // final entry must be null, as we don't pass in count
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

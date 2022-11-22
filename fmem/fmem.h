@@ -74,7 +74,7 @@ static struct fmem* fmem_from_existing(void *on_mem);
 // we don't support allocation more than 2^32- PAGE_OVERHEAD
 static void* fmem_alloc(struct fmem *fm, uint32_t);
 
-// frees a memory and returns total freed memory (includes page overhead, which will also be returned to bool)
-// BAD_MEM is tested for this one
-static int32_t fmem_free(struct fmem *fm, void *mem);
+// frees a memory and returns total freed memory (includes page overhead, which will also be returned to pool)
+// BAD_MEM is tested for this one (this is why we have such a wide return data type).
+static int64_t fmem_free(struct fmem *fm, void *mem);
 #endif

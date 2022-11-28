@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+
 #include "list/list.h"
 #include "fmem.h"
 
@@ -92,40 +93,41 @@ static inline void fpage_set_free(struct fmem_page *fpage){
 // we merge pages to:
 // 1- minimize the # of iteration needed to find a free page
 // 2- create holes of free mem big enough to accomdate large allocs
-static void fpage_merge(struct fmem_page *fpage){
+static struct fmem_page* fpage_merge(struct fmem_page *fpage){
 // there are three possibilities:
 // 1- prev and next are free (best case) merge all
 // 2- prev is free merge current into previous
 // 3- next is free merge next into current
-struct fmem_page *prev = list_entry(fpage->list.prev, struct fmem_page, list);
-struct fmem_page *next = list_entry(fpage->list.next, struct fmem_page, list);
+  struct fmem_page *prev = list_entry(fpage->list.prev, struct fmem_page, list);
+  struct fmem_page *next = list_entry(fpage->list.next, struct fmem_page, list);
 
-bool prev_is_same = (prev == fpage);
-bool next_is_same = (next == fpage);
+  bool prev_is_same = (prev == fpage);
+  bool next_is_same = (next == fpage);
 
   // merge current and next into prev
   if((!prev_is_same && fpage_is_free(prev)) && (!next_is_same && fpage_is_free(next))){
     prev->size = prev->size + fpage->size + next->size; // give all size to first one
     list_remove_at(&next->list);
     list_remove_at(&fpage->list);
-    return;
+    return prev;
   }
 
   // merge current into previous
   if(!prev_is_same && fpage_is_free(prev)){
     prev->size = prev->size + fpage->size;
     list_remove_at(&fpage->list);
-    return;
+    return prev;
   }
 
   // merge next into current
   if(!next_is_same && fpage_is_free(next)){
     fpage->size = fpage->size + next->size;
     list_remove_at(&next->list);
-    return;
+    return fpage;
   }
 
-  // no d ice. both prev, next are busy
+  // no dice. both prev, next are busy
+  return fpage;
 }
 
 // returns a refrence to memory owned by a page
@@ -139,45 +141,45 @@ static inline struct fmem_page* fpage_from_mem(void *mem){
 
 
 static inline bool atomic_compare_swap(uint32_t * ptr, uint32_t compare, uint32_t exchange) {
-	return __atomic_compare_exchange_n(ptr, &compare, exchange,	0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return __atomic_compare_exchange_n(ptr, &compare, exchange, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 // spin lock style locking mechnasim, we have only one lock
 // we are trying to minimize deps so we are not trying to link
 // to pthread
 static void inline fmem_lock(struct fmem *fm){
-	 while(!atomic_compare_swap(&fm->lock, 0, 1)) {
-						}
+   while(!atomic_compare_swap(&fm->lock, 0, 1)) {
+            }
 }
 
 
 static void inline fmem_unlock(struct fmem *fm){
-	 __atomic_store_n(&fm->lock, 0, __ATOMIC_SEQ_CST);
+   __atomic_store_n(&fm->lock, 0, __ATOMIC_SEQ_CST);
 }
 
 static inline int64_t fail_on_poison_check(uint16_t poison, uint16_t expected, char* message){
 #if defined(__UNIT_TESTING__) && defined(__BAD_MEM__)
-	// used only during unit testing
-	if(poison != expected){
-		return EE_BAD_MEM;
-	}
+  // used only during unit testing
+  if(poison != expected){
+    return EE_BAD_MEM;
+  }
 #endif
 
 #if !defined(__UNIT_TESTING__) && defined(__BAD_MEM__)
-	if if(poison != expected){
-		// runtime mode. we need to exit. This should - hopefully - be detected in integration testing
-		printf("******************* WARNING! WARNING!*********************");
-		printf("memory corruption detected on: %s", message);
-		printf("**********************************************************");
-		exit(2);
-	}
+  if if(poison != expected){
+    // runtime mode. we need to exit. This should - hopefully - be detected in integration testing
+    printf("******************* WARNING! WARNING!*********************");
+    printf("memory corruption detected on: %s", message);
+    printf("**********************************************************");
+    exit(2);
+  }
 #endif
 
-	return 0;
+  return 0;
 }
 
 // creates an allocator on preallocated memory. The allocator uses the entire length of memory
-static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc){
+static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc, committer_t committer){
   if(length < MIN_TOTAL_ALLOCATION) return (void *) E_TOTAL_ALLOCATION_SIZE_TOO_SMALL;
   if (length < (min_alloc + (2 * PAGE_OVERHEAD) + sizeof(struct fmem))) return  (void *) E_BAD_INIT_MEM; // we can't really use it
   if (min_alloc < DEFAULT_MIN_ALLOC) min_alloc = DEFAULT_MIN_ALLOC;
@@ -195,7 +197,9 @@ static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_a
   fm->total_available = length - ((2 * PAGE_OVERHEAD) + sizeof(struct fmem)); // but we used two headers and main accounting object
   fm->min_alloc = min_alloc; // set the min alloc we operate on
   fm->alloc_objects = 0;
-
+	if (committer != NULL){
+		fm->committer = committer;
+	}
   // create a second page (this is first empty massive page
   char * start = (char *) fpage_head;
   struct fmem_page *main_fpage = (struct fmem_page *) (start + fpage_head->size);
@@ -209,25 +213,43 @@ static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_a
   fpage_set_magic(fpage_head, POISON);
   fpage_set_magic(main_fpage, POISON);
 #endif
+
+	// commit if needed
+	if(fm->committer != NULL){
+		struct commit_range r = {0};
+		r.start = on_mem;
+		r.len = PAGE_OVERHEAD + sizeof(struct fmem) + PAGE_OVERHEAD;
+		if (fm->committer(&r, 1) < 0) return (struct fmem *) E_COMMIT_FAILED;
+	}
+
   return fm;
 }
 
-
-
 // gets a reference to an existing allocator occupying on_mem memory
-static struct fmem* fmem_from_existing(void * on_mem){
+static struct fmem* fmem_from_existing(void * on_mem, committer_t committer){
   // our accounting object is stashed in head page
   struct fmem_page *fpage_head = (struct fmem_page *) on_mem;
 
-	int64_t check = fail_on_poison_check(fpage_get_magic(fpage_head), POISON, "reloading existing allocator (head page)");
-	if( check != 0) return  ((struct fmem *) check);
+  int64_t check = fail_on_poison_check(fpage_get_magic(fpage_head), POISON, "reloading existing allocator (head page)");
+  if( check != 0) return  ((struct fmem *) check);
 
 
-	struct fmem *fm = (struct fmem *) mem_from_fpage(fpage_head);
+  struct fmem *fm = (struct fmem *) mem_from_fpage(fpage_head);
+	if (committer != NULL){
+		fm->committer = committer;
+	}
+
+	fmem_unlock(fm); // this could be potentially dangerous
+
+	// we don't try to commit here. because one of the following is true
+	// this was commited before and create_from_new does not change anything so there is no need to commit again
+	// this was not committed before and commit is just used, in this case we will save the header anyway
+	// on first alloc/free ops
 
   return fm;
 }
 
+// allocates memory from fmem
 static void* fmem_alloc(struct fmem *fm, uint32_t size){
   void* ret = NULL;
   struct fmem_page *selected = NULL;
@@ -235,8 +257,8 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
 
   fmem_lock(fm);
   if (fm->total_available < adjusted_alloc) {
-					goto done;
-		}
+          goto done;
+    }
 
   // carving pages always carve towards the end of the page
   // meaning: our free pages are always closer(on the right) to head. this result into:
@@ -244,19 +266,20 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
   // 2- worest alloc (if we fill up and then release the last alloc) then it will be o(n)
   // hence size of alloc matter. Larger is better. Larger yeilds into lower page count
   //  we can get clever by maintain a cache of free pages but that will be later on
-    // get head page
+  // get head page
   struct fmem_page *head_page = fpage_from_mem(fm); // this the page that holds our accounting object. We don't iterate over it
   struct list_head *head = &head_page->list;
   struct list_head *current = head;
+	bool carved = false;
   list_for_each(current, head){
     struct fmem_page *this_page = list_entry(current, struct fmem_page, list);
 
-		// check for corruption
-		int64_t check = fail_on_poison_check(fpage_get_magic(this_page), POISON, "iterating and checking mem pages");
-		if( check != 0){
-					 ret = (void *)	check;
-					 goto done;
-		}
+    // check for corruption
+    int64_t check = fail_on_poison_check(fpage_get_magic(this_page), POISON, "iterating and checking mem pages");
+    if( check != 0){
+           ret = (void *) check;
+           goto done;
+    }
 
     if (false == fpage_is_free(this_page)) continue; // can't work with a page in use
     int fit_status = fpage_can_fit(this_page, adjusted_alloc);
@@ -265,9 +288,11 @@ static void* fmem_alloc(struct fmem *fm, uint32_t size){
         break;
       case FIT_AS_IS:
         selected = this_page;
+				carved = false;
         goto done;
       case FIT_WITH_CARVE: // we need to carve this page
         fpage_carve(this_page, &selected, adjusted_alloc);// carve it
+				carved = true;
         goto done;
     }
   }
@@ -283,6 +308,33 @@ done:
     fm->total_available -= selected->size;
     fm->alloc_objects += 1;
     ret = mem_from_fpage(selected);
+
+		if(fm->committer != NULL){
+			if(carved){
+				// we need to save
+				// selected page header
+				// next page list
+				// previous page header
+				struct commit_range ranges[3] = {0};
+				ranges[0].start = selected;
+				ranges[0].len = sizeof(struct fmem_page);
+
+				struct fmem_page *prev = list_entry(selected->list.prev, struct fmem_page, list);
+				ranges[1].start = prev;
+				ranges[1].len = sizeof(struct fmem_page);
+
+				struct list_head *next = selected->list.next;
+				ranges[2].start = next;
+				ranges[2].len = sizeof(struct list_head);
+				if( fm->committer(ranges, 1) < 0) ret = (void *) E_COMMIT_FAILED;
+			}else{
+				//if as is then we just need to commit current page header
+				struct commit_range range = {0};
+				range.start = selected;
+				range.len = sizeof(struct fmem_page);
+				if( fm->committer(&range, 1) < 0) ret = (void *) E_COMMIT_FAILED;
+			}
+		}
   }
 
   fmem_unlock(fm);
@@ -292,25 +344,91 @@ done:
 // frees a memory and returns total freed memory (includes page overhead, which will also be returned to pool)
 // BAD_MEM is tested for this one
 static int64_t fmem_free(struct fmem *fm, void *mem){
-  // TODO  bad mem
   struct fmem_page *fpage = fpage_from_mem(mem); // get the page for that mem. page is always stashed before the mem
 
-	// POISON CHECK
-	int64_t check = fail_on_poison_check(fpage_get_magic(fpage), POISON, "reloading existing allocator");
-	if( check != 0) return check;
+  // POISON CHECK
+  int64_t check = fail_on_poison_check(fpage_get_magic(fpage), POISON, "reloading existing allocator");
+  if( check != 0) return check;
 
 
   fmem_lock(fm);
 
-  uint32_t to_free = fpage->size; // keep the size aside
+  int64_t to_free = (int64_t) fpage->size; // keep the size aside
   fpage_set_free(fpage); // free it
-  fpage_merge(fpage); // merge, if we can
+  struct fmem_page *modified = fpage_merge(fpage); // merge, if we can
   // accountig
   fm->alloc_objects -= 1;
   fm->total_available += to_free;
 
+	if(fm->committer != NULL){
+		// commit
+		// header for modified
+		// header for previous (we only need the list pointers)
+		// header for next (we only need the list pointers)
+		// we can get clever here but will keep it simple for now
+		struct commit_range ranges[3] = {0};
+  	struct list_head *prev = fpage->list.prev;
+  	struct list_head *next = fpage->list.next;
+
+		ranges[0].start = modified;
+		ranges[0].len = sizeof(struct fmem_page);
+
+		// prev
+		ranges[1].start = prev;
+		ranges[1].len = sizeof(struct list_head);
+
+		// next
+		ranges[2].start = next;
+		ranges[2].len =sizeof(struct list_head);
+
+		 if(fm->committer(ranges, 3) < 0)  {
+				to_free = E_COMMIT_FAILED;
+		 }
+	}
+
   fmem_unlock(fm);
   return to_free;
+}
+
+static int64_t fmem_commit_user_data(struct fmem *fm){
+	if(fm->committer == NULL) return E_COMMIT_FAILED;
+
+  // POISON CHECK
+	struct fmem_page *fhead_page = fpage_from_mem(fm);
+  int64_t check = fail_on_poison_check(fpage_get_magic(fhead_page), POISON, "committing user data");
+  if( check != 0) return check;
+
+	// we don't need to lock here
+	struct commit_range r = {0};
+	r.start = (void *) fm->user1;
+	r.len = 4 * sizeof(fm->user1);
+	if (fm->committer(&r, 1) < 0) return E_COMMIT_FAILED;
+
+	return r.len;
+}
+
+static int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len){
+	 if(fm->committer == NULL) return E_COMMIT_FAILED;
+
+	// should we lock here?
+	struct fmem_page *fpage = fpage_from_mem(mem);
+  // POISON CHECK
+  int64_t check = fail_on_poison_check(fpage_get_magic(fpage), POISON, "committing user memory");
+  if( check != 0) return check;
+
+	uint32_t page_size = fpage_actual(fpage);
+	if (len == 0){
+		len = page_size; // if no len then
+	}else{
+		if ( ((char *) mem + len) > ((char *) fpage +  page_size)) return E_COMMIT_FAILED;
+	}
+
+	struct commit_range r = {0};
+	r.start = mem;
+	r.len = len;
+	if (fm->committer(&r,1) < 0) return E_COMMIT_FAILED;
+
+	return len;
 }
 
 #ifdef __UNIT_TESTING__
@@ -321,6 +439,58 @@ static int64_t fmem_free(struct fmem *fm, void *mem){
 
 #define small_buffer_size 10
 #define large_buffer_size 50 * 1024
+
+// test committer saves data here
+#define MAX_COMMIT  3
+struct commit_range  __test_ranges[MAX_COMMIT] = {0};
+int committed_range_count = 0;
+
+// resets committed values
+static void reset_test_committer(){
+	committed_range_count = 0;
+}
+static int failed_test_committer(struct commit_range *ranges, uint8_t count){
+	return -1;
+}
+// a test committer
+static int test_committer(struct commit_range *ranges, uint8_t count){
+	if (count == 0){
+			printf("TEST FAIL: committer got 0 count!\n");
+			return -1;
+	}
+
+	if (committed_range_count+ count > MAX_COMMIT){
+		printf("TEST FAIL: COMMITTER has %d and want additional %d which put it higher than max:%d\n",
+						committed_range_count, count, MAX_COMMIT);
+		return -1;
+	}
+	memcpy(__test_ranges + committed_range_count, ranges, count * sizeof(struct commit_range));
+	committed_range_count += count;
+	return 0;
+}
+
+// compares to whatever committer saved
+static MunitResult test_committer_compare_to(struct commit_range *expected, uint8_t count, bool count_only){
+	if(committed_range_count != count){
+		munit_logf(MUNIT_LOG_INFO, "got:%d expected:%d",committed_range_count, count);
+		return MUNIT_FAIL;
+	}
+
+	if (count_only) return MUNIT_OK;
+
+	for(int pos = 0; pos < committed_range_count; pos++){
+			struct commit_range *expected_current = expected + pos;
+			struct commit_range *saved_current = &__test_ranges[pos];
+
+			munit_logf(MUNIT_LOG_INFO, "at: %d", pos);
+			munit_assert(expected_current->start == saved_current->start);
+
+
+			munit_logf(MUNIT_LOG_INFO, "expected len:%lu: got:%lu",saved_current->len,  expected_current->len );
+			munit_assert(expected_current->len == saved_current->len);
+	}
+	return MUNIT_OK;
+}
 
 // handy helper to make  apage
 static void make_fpage(struct fmem_page *fpage, uint32_t size){
@@ -344,37 +514,126 @@ static int count_pages(struct fmem_page *fpage){
   return count+1;
 }
 
+static MunitResult test_fmem_commit(const MunitParameter params[], void* data){
+
+	char buffer[large_buffer_size] = {0};
+	struct commit_range compare_ranges[3] = {0};
+
+	// CASE: create new with bad committer
+	reset_test_committer();
+  struct fmem *bad_committer_fm = fmem_create_new(buffer, large_buffer_size, 0, failed_test_committer);
+  munit_assert(bad_committer_fm == (struct fmem *) E_COMMIT_FAILED);
+
+	// CASE: create new with good one
+	reset_test_committer();
+	struct fmem *fm = fmem_create_new(buffer, large_buffer_size, 0, test_committer);
+	// create compare
+	compare_ranges[0].start = (void *) buffer;
+	compare_ranges[0].len = PAGE_OVERHEAD + sizeof(struct fmem) + PAGE_OVERHEAD;
+	MunitResult compare_res = test_committer_compare_to(compare_ranges, 1, false);
+	if (compare_res != MUNIT_OK) return compare_res;
+
+	// CASE: commit user data with bad committer
+	reset_test_committer();
+	fm->committer = failed_test_committer;
+	munit_assert(fmem_commit_user_data(fm) ==  E_COMMIT_FAILED);
+
+	// CASE: commit user data with good committer
+	reset_test_committer();
+	fm->committer = test_committer;
+	munit_assert(fmem_commit_user_data(fm) > 0 );
+	compare_ranges[0].start = fm->user1;
+	compare_ranges[0].len = 4 * sizeof(fm->user1);
+	compare_res = test_committer_compare_to(compare_ranges, 1, false);
+	if (compare_res != MUNIT_OK) return compare_res;
+
+
+	// CASE: alloc with bad committer
+	reset_test_committer();
+	fm->committer = failed_test_committer;
+	munit_assert(fmem_alloc(fm, 10) ==  (void *) E_COMMIT_FAILED);
+	// TODO: alloc with good committer (for both cases as-is or carving)
+
+
+	// CASE: commit user data with bad committer
+	reset_test_committer();
+	fm->committer = test_committer;
+	void * alloc1 = fmem_alloc(fm, 10);
+	munit_assert(alloc1 > 0);
+	fm->committer = failed_test_committer;
+	munit_assert(fmem_commit_mem(fm, alloc1, 0) == E_COMMIT_FAILED);
+
+	// CASE: commit user data with good committer
+	reset_test_committer();
+	fm->committer = test_committer;
+	void * alloc2 = fmem_alloc(fm, 10); // this allocates min allocation
+	munit_assert(alloc2 > 0);
+	reset_test_committer();
+	munit_assert(fmem_commit_mem(fm, alloc2, 0) > 0);
+
+	compare_ranges[0].start = alloc2;
+	compare_ranges[0].len = 24; /* min defaulted allocation) */
+	compare_res = test_committer_compare_to(compare_ranges, 1, false);
+	if (compare_res != MUNIT_OK) return compare_res;
+
+
+	// CASE: free with bad committer
+	reset_test_committer();
+	fm->committer = test_committer;
+	void * alloc3 = fmem_alloc(fm, 10); // this allocates min allocation
+	munit_assert(alloc3 > 0);
+	reset_test_committer();
+	fm->committer = failed_test_committer;
+	munit_assert(fmem_free(fm, alloc3) == E_COMMIT_FAILED);
+
+
+	// case: free with good committer
+	reset_test_committer();
+	fm->committer = test_committer;
+	void * alloc4 = fmem_alloc(fm, 10); // this allocates min allocation
+	munit_assert(alloc4 > 0);
+	reset_test_committer();
+	munit_assert(fmem_free(fm, alloc3) > 0);
+
+	// it is hard to get the offsets without channging code with if def for testing, so we are testing against count only
+	compare_res = test_committer_compare_to(NULL, 3, true);
+	if (compare_res != MUNIT_OK) return compare_res;
+
+
+	return MUNIT_OK;
+}
+
 static MunitResult test_fmem_poison(const MunitParameter params[], void* data){
     // test that small buffers are not welcomed
     char buffer[large_buffer_size] = {0};
-    struct fmem *original_fm = fmem_create_new(buffer, large_buffer_size, 0);
-		munit_assert(original_fm > 0);
+    struct fmem *original_fm = fmem_create_new(buffer, large_buffer_size, 0, NULL);
+    munit_assert(original_fm > 0);
 
-		// corrupt head page
+    // corrupt head page
     // this also checks the correct stashing of our accounting object
     struct fmem_page *head_page = fpage_from_mem(original_fm);
-		fpage_set_magic(head_page,0);
+    fpage_set_magic(head_page,0);
 
-		// reuse it
-		struct fmem *reused = fmem_from_existing(buffer);
-		munit_assert(EE_BAD_MEM == (int64_t) reused);
+    // reuse it
+    struct fmem *reused = fmem_from_existing(buffer, NULL);
+    munit_assert(EE_BAD_MEM == (int64_t) reused);
 
-		// reset to fix it.
-		original_fm = fmem_create_new(buffer, large_buffer_size, 0);
-		head_page = fpage_from_mem(original_fm);
-		// we know that there is two pages, lets mess up the second on
+    // reset to fix it.
+    original_fm = fmem_create_new(buffer, large_buffer_size, 0, NULL);
+    head_page = fpage_from_mem(original_fm);
+    // we know that there is two pages, lets mess up the second on
     struct fmem_page *main_page = list_entry(head_page->list.next, struct fmem_page, list);
-		fpage_set_magic(main_page, 0);
+    fpage_set_magic(main_page, 0);
 
-		void *mem = fmem_alloc(original_fm, large_buffer_size /2);
-	 	munit_assert(EE_BAD_MEM == (int64_t) mem);
+    void *mem = fmem_alloc(original_fm, large_buffer_size /2);
+    munit_assert(EE_BAD_MEM == (int64_t) mem);
 
-		return MUNIT_OK;
+    return MUNIT_OK;
 }
 
 static MunitResult test_fmem_free_poison(const MunitParameter params[], void* data){
     char buffer[large_buffer_size] = {0};
-    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, PAGE_OVERHEAD);
+    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, PAGE_OVERHEAD, NULL);
     munit_assert(fm > 0);
 
     // alloc one
@@ -382,21 +641,21 @@ static MunitResult test_fmem_free_poison(const MunitParameter params[], void* da
     mem = fmem_alloc(fm, PAGE_OVERHEAD);
     munit_assert(mem != NULL && mem > 0);
 
-		// lets mess it up
-		struct fmem_page *fpage = fpage_from_mem(mem);
-		fpage_set_magic(fpage, 0);// invalidates the magic
-		munit_assert(fmem_free(fm, mem) == EE_BAD_MEM);
-		return MUNIT_OK;
+    // lets mess it up
+    struct fmem_page *fpage = fpage_from_mem(mem);
+    fpage_set_magic(fpage, 0);// invalidates the magic
+    munit_assert(fmem_free(fm, mem) == EE_BAD_MEM);
+    return MUNIT_OK;
 }
 
 
 static MunitResult test_fmem_alloc_fails(const MunitParameter params[], void* data){
     char buffer[large_buffer_size] = {0};
 
-    struct fmem *fm_small_mem_big_min_alloc =  fmem_create_new(buffer, MIN_TOTAL_ALLOCATION, MIN_TOTAL_ALLOCATION/ 2);
+    struct fmem *fm_small_mem_big_min_alloc =  fmem_create_new(buffer, MIN_TOTAL_ALLOCATION, MIN_TOTAL_ALLOCATION/ 2, NULL);
     munit_assert(fm_small_mem_big_min_alloc == (void *) E_BAD_INIT_MEM);
 
-    struct fmem *fm_fails = fmem_create_new(buffer, large_buffer_size, DEFAULT_MIN_ALLOC);
+    struct fmem *fm_fails = fmem_create_new(buffer, large_buffer_size, DEFAULT_MIN_ALLOC, NULL);
 
     // try to allocate larger than available
     munit_assert(fmem_alloc(fm_fails, large_buffer_size) == (void *) FMEM_E_NOMEM);
@@ -413,7 +672,7 @@ static MunitResult test_fmem_alloc_fails(const MunitParameter params[], void* da
 
 static MunitResult test_fmem_alloc_free_simple(const MunitParameter params[], void* data){
     char buffer[large_buffer_size] = {0};
-    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, PAGE_OVERHEAD);
+    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, PAGE_OVERHEAD, NULL);
     munit_assert(fm > 0);
 
     size_t original_available = fm->total_available;
@@ -449,13 +708,15 @@ static MunitResult test_fmem_alloc_free_simple(const MunitParameter params[], vo
 static MunitResult test_fmem_creation(const MunitParameter params[], void* data){
     // test that small buffers are not welcomed
     char small_buffer[small_buffer_size] = {0};
-    struct fmem *bad_fm = fmem_create_new(small_buffer, small_buffer_size, 5);
+    struct fmem *bad_fm = fmem_create_new(small_buffer, small_buffer_size, 5, NULL);
     munit_assert(bad_fm == (void *)E_TOTAL_ALLOCATION_SIZE_TOO_SMALL);
 
     // test that object was created correctly
     char buffer[large_buffer_size] = {0};
-    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, 10);
+    struct fmem *fm =  fmem_create_new(buffer, large_buffer_size, 10, NULL);
     munit_assert(fm != NULL);
+
+		munit_assert(fm->committer == NULL); // committer is not set
 
     // this also checks the correct stashing of our accounting object
     struct fmem_page *head_page = fpage_from_mem(fm);
@@ -484,13 +745,24 @@ static MunitResult test_fmem_creation(const MunitParameter params[], void* data)
 
 
     // check that create frome existing work as expected
-    struct fmem *fm_other = fmem_from_existing(buffer);
+    struct fmem *fm_other = fmem_from_existing(buffer, NULL);
     munit_assert(fm_other == fm);
+		munit_assert(fm_other->committer == NULL); // committer is not set
 
     // test that large min allocs are respected
-    struct fmem *fm_large_alloc =  fmem_create_new(buffer, large_buffer_size, 5 * sizeof(struct fmem_page));
+    struct fmem *fm_large_alloc =  fmem_create_new(buffer, large_buffer_size, 5 * sizeof(struct fmem_page), NULL);
     munit_assert(fm_large_alloc->min_alloc == 5 * sizeof(struct fmem_page));
     munit_assert(fm_large_alloc > 0);
+
+		// test setting the committer
+
+		struct fmem *fm_with_committer =  fmem_create_new(buffer, large_buffer_size, 10, test_committer);
+		munit_assert(fm_with_committer->committer == test_committer);
+		// clear it
+		fm_with_committer->committer = NULL;
+		struct fmem *fm_other_with_comitter = fmem_from_existing(buffer, test_committer);
+		munit_assert(fm_other_with_comitter->committer == test_committer);
+
 
     return MUNIT_OK;
 }
@@ -812,6 +1084,9 @@ static MunitResult test_fmem_get_size(const MunitParameter params[], void* data)
 // all tests
 MunitTest fmem_tests[] = {
   /* tests struct: name(string),  test func, setup func, tear down func, opts, params*/
+	// TEST ORDER IS IMPORTANT.
+	// While tests are written new on top, they are wired to the suite in logical order
+	// some failure in early tests will result into failure in later tests.
   {"/page-size", test_fmem_get_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/page-fit", test_fpage_fit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/page-carving", test_fpage_carving, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
@@ -821,14 +1096,14 @@ MunitTest fmem_tests[] = {
   {"/page-merging-none", test_fpage_merge_none, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/page-flags-handling", test_fpage_flags_handling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/page-mem-handling", test_fpage_mem_handling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
-  // fmem tests, because of the obvious dependancy fmem tests must run after fmem_page
-  // tests. a failure above will almost certainly result in failure below
   {"/fmem-creation", test_fmem_creation, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/fmem-simple-alloc-free", test_fmem_alloc_free_simple, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
   {"/fmem-simple-alloc-fails", test_fmem_alloc_fails, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
-	// poison tests
-	{"/fmem-all-free-poison", test_fmem_free_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
-	{"/fmem-reuse-poison", test_fmem_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+  // poison tests
+  {"/fmem-all-free-poison", test_fmem_free_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+  {"/fmem-reuse-poison", test_fmem_poison, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+	// commit tests
+	{"/fmem-commit", test_fmem_commit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
 
   // final entry must be null, as we don't pass in count
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

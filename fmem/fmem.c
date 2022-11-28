@@ -179,7 +179,7 @@ static inline int64_t fail_on_poison_check(uint16_t poison, uint16_t expected, c
 }
 
 // creates an allocator on preallocated memory. The allocator uses the entire length of memory
-static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc, committer_t committer){
+struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc, committer_t committer){
   if(length < MIN_TOTAL_ALLOCATION) return (void *) E_TOTAL_ALLOCATION_SIZE_TOO_SMALL;
   if (length < (min_alloc + (2 * PAGE_OVERHEAD) + sizeof(struct fmem))) return  (void *) E_BAD_INIT_MEM; // we can't really use it
   if (min_alloc < DEFAULT_MIN_ALLOC) min_alloc = DEFAULT_MIN_ALLOC;
@@ -226,7 +226,7 @@ static struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_a
 }
 
 // gets a reference to an existing allocator occupying on_mem memory
-static struct fmem* fmem_from_existing(void * on_mem, committer_t committer){
+struct fmem* fmem_from_existing(void * on_mem, committer_t committer){
   // our accounting object is stashed in head page
   struct fmem_page *fpage_head = (struct fmem_page *) on_mem;
 
@@ -250,7 +250,7 @@ static struct fmem* fmem_from_existing(void * on_mem, committer_t committer){
 }
 
 // allocates memory from fmem
-static void* fmem_alloc(struct fmem *fm, uint32_t size){
+void* fmem_alloc(struct fmem *fm, uint32_t size){
   void* ret = NULL;
   struct fmem_page *selected = NULL;
   uint32_t adjusted_alloc = size < fm->min_alloc ? fm->min_alloc : size;
@@ -343,7 +343,7 @@ done:
 
 // frees a memory and returns total freed memory (includes page overhead, which will also be returned to pool)
 // BAD_MEM is tested for this one
-static int64_t fmem_free(struct fmem *fm, void *mem){
+int64_t fmem_free(struct fmem *fm, void *mem){
   struct fmem_page *fpage = fpage_from_mem(mem); // get the page for that mem. page is always stashed before the mem
 
   // POISON CHECK
@@ -390,7 +390,7 @@ static int64_t fmem_free(struct fmem *fm, void *mem){
   return to_free;
 }
 
-static int64_t fmem_commit_user_data(struct fmem *fm){
+int64_t fmem_commit_user_data(struct fmem *fm){
 	if(fm->committer == NULL) return E_COMMIT_FAILED;
 
   // POISON CHECK
@@ -407,7 +407,7 @@ static int64_t fmem_commit_user_data(struct fmem *fm){
 	return r.len;
 }
 
-static int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len){
+int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len){
 	 if(fm->committer == NULL) return E_COMMIT_FAILED;
 
 	// should we lock here?

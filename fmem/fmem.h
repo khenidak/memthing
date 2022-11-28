@@ -93,31 +93,31 @@ struct fmem{
 // creates an allocator on preallocated memory. The allocator uses the entire length of memory
 // if min alloc is less than DEFAULT_MIN_ALLOC we will ddefault to it
 // returns E_COMMIT_FAILED
-static struct fmem* fmem_create_new(void *on_mem, size_t length, uint32_t min_alloc, committer_t committer);
+struct fmem* fmem_create_new(void *on_mem, size_t length, uint32_t min_alloc, committer_t committer);
 
 // gets a reference to an existing allocator occupying on_mem memory
 // BAD_MEM is tested for this one
-static struct fmem* fmem_from_existing(void *on_mem, committer_t committer);
+struct fmem* fmem_from_existing(void *on_mem, committer_t committer);
 
 // allocates memory, returns reference
 // we don't support allocation more than 2^32- PAGE_OVERHEAD
 // returns E_COMMIT_FAILED if commit failed
-static void* fmem_alloc(struct fmem *fm, uint32_t size);
+void* fmem_alloc(struct fmem *fm, uint32_t size);
 
 // frees a memory and returns total freed memory (includes page overhead, which will also be returned to pool)
 // BAD_MEM is tested for this one (this is why we have such a wide return data type).
 // returns E_COMMIT_FAILED if commit failed
-static int64_t fmem_free(struct fmem *fm, void *mem);
+int64_t fmem_free(struct fmem *fm, void *mem);
 
 //commits user set root pointers to backing store
 // returns E_COMMIT_FAILED if commit failed
 // BAD_MEM is tested here
-static int64_t fmem_commit_user_data(struct fmem *fm); // TODO
+int64_t fmem_commit_user_data(struct fmem *fm); // TODO
 
 // commits a memory that was allocated from that fmem into backing store
 // returns E_COMMIT_FAILED if commit fails
 // returns E_COMMIT_FAILED if mem is outside the allocated range
 // len == 0 means the entire allocation used for this mem
 // BAD_MEM is tested here
-static int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len); // TODO
+int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len); // TODO
 #endif

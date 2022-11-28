@@ -33,6 +33,23 @@ fmem-unit-test: munit/munit.o list/list.o ## Runs unit tests for list module
 unit-tests: list-unit-test fmem-unit-test
 
 
+things-mem: list/list.o fmem/fmem.o ## runs memory alloc example (non presisted)
+# all unit tests are ifdef-ed into the same code file they test.
+# the below __UNIT_TESTING__ (+ building as executable) is needed
+# to be able to run the tests later on
+	@echo "++ Running mem alloc example (non presisted)"
+# bad mem poisons the memory boundries
+	@$(CC) -Wall -D __BAD_MEM__ -o $(OUTPUT_DIR)/example_things_mem things_mem.c $(OUTPUT_DIR)/fmem.o  $(OUTPUT_DIR)/list.o $(CFLAGS)
+	@echo "+ Running init to create memory.."
+	@$(OUTPUT_DIR)/example_things_mem -i
+	@echo "exit ..."
+	@echo "+ Running READ to read memory.."
+	@$(OUTPUT_DIR)/example_things_mem -r
+	@echo "exit ..."
+	@echo "+ Running CLEANUP to remove memory.."
+	@$(OUTPUT_DIR)/example_things_mem -c
+
+
 output-dir: ## Makes output directory
 	@mkdir -p $(OUTPUT_DIR)
 

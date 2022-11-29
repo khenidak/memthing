@@ -112,12 +112,14 @@ int64_t fmem_free(struct fmem *fm, void *mem);
 //commits user set root pointers to backing store
 // returns E_COMMIT_FAILED if commit failed
 // BAD_MEM is tested here
-int64_t fmem_commit_user_data(struct fmem *fm); // TODO
+int64_t fmem_commit_user_data(struct fmem *fm);
 
 // commits a memory that was allocated from that fmem into backing store
 // returns E_COMMIT_FAILED if commit fails
 // returns E_COMMIT_FAILED if mem is outside the allocated range
 // len == 0 means the entire allocation used for this mem
+// start to len must fit within the original allocation
+// that was used to allocate this memory
 // BAD_MEM is tested here
 int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len); // TODO
 #endif

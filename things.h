@@ -16,7 +16,7 @@ typedef void* (*alloc_t)(size_t size);
 
 // oneach is called when the things maker allocates and creates an object
 // it is called for header (things)  and each (thing)
-typedef void (*oneach_t)(void *each);
+typedef void (*oneach_t)(void *each, size_t len);
 
 // a list of things
 struct things{
@@ -67,8 +67,8 @@ int make_wellknown_things(void **where, alloc_t allocator, oneach_t oneach){
     header->count++;
 
     if(oneach != NULL){
-      oneach(header); // header changes every time.
-      oneach(this_thing);
+      oneach(header, sizeof(struct things)); // header changes every time.
+      oneach(this_thing, sizeof(struct thing));
     }
   }
 
@@ -78,7 +78,7 @@ int make_wellknown_things(void **where, alloc_t allocator, oneach_t oneach){
 // compares a list of things to a well known thing
 int verify_things(struct things *what){
 	if(what == NULL) return -1;
-		
+
 	// create a copy to compare to
 	void *_to = NULL;
 	if (make_wellknown_things(&_to, malloc, NULL) <= 0) return -1;
@@ -101,9 +101,9 @@ int verify_things(struct things *what){
 		struct thing *to_current_thing = list_entry(to_current, struct thing, list);
 		if(current_thing->value != to_current_thing->value){
 			printf("at %d expected value %c != %c\n", i, current_thing->value, to_current_thing->value);
-			return -1;	
-		}	
-	 printf("at %d value %c == %c\n", i, current_thing->value, to_current_thing->value);
+			return -1;
+		}
+		 printf("at %d value %c == %c\n", i, current_thing->value, to_current_thing->value);
 
 		to_current = to_current->next; // we are comparing two lists
 		i++;

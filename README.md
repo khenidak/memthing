@@ -1,19 +1,20 @@
 ## What is this?
 
 mem thing is a memory allocator that sets on top of a fixed sized memory allocated by the caller. It is designed for apps that uses configuration or control-plan data and would want to stash it in a shared memory map that outlives the processes that either produce, consume, or both this data. It can do:
-1. Fast - in most cases - Arbitrary size memory allocation.
-2. Cached memory allocation. Memory is allocated once by caller. Freed memory is cached and is not returned to system. This is not designed as a buddy  allocator though it shares some properties with it.
-3. Ability to commit memory segments (in case of file backed memory maps). For applications that needs to cache this data to survive system reboots they will have to persist this data on disk. The allocator has (TODO) automatic persistence for its own internal data and offers an external `commit` interface for callers.
-4. Automatic detection of memory corruption (build using `__BAD_MEM__` macro) via memory poisoning.
+1. Fast - in most cases - arbitrary size memory allocation.
+2. Cached memory allocation. Memory is allocated once by caller. Freed memory is cached and is not returned to system. This is not designed as a buddy allocator though it shares some properties with it.
+3. Ability to commit memory segments. For applications that needs to cache this data to survive system reboots they will have to persist this data on disk. The allocator has automatic persistence for its own internal data and offers an external `commit` interface for callers. The commit interface is a function provided by caller.
+4. Automatic detection of memory corruptions (build using `__BAD_MEM__` macro) via memory poisoning.
 5. The allocator allocates in o(1) in most cases. However if the entire memory was allocated then arbitrary freed max allocation time is o(n) where n is the number of objects allocated.
 
-## Things to come
-1. File backing aware allocator allowing users to commit partial memory to the file backing this memory (e.g., file backed memory maps).
-2. Corruption detection. The idea is to have poison value in well known locations to check if memory has been corrupted.
-3. Sample control plane data exchange.
+## Examples Provided
+1. An allocator that sits on top of a shared memory object mapped into proc memory. The example uses no persistence run `make example-things-mem`.
+2. An allocator that sits on a memory mapped (with file backing) the application provides its own persistence func to commit memory via `msync(2)` calls run `make example-things-mem-persisted`
+
+> unit test code should provide enough details on the ins and outs of the fixed memory allocator.
 
 ## On Memory Moves
-The allocator does not support memory moves. Memory moves is a situation where an application creates a memory map at address `xyz` then restarts, then remap the same memory to a different address `xxz` essentially invalidating all the pointers in any in memory object graph including allocator own. For now we assume that apps will always remap at the same address. If and only if we find that apps are unable to always do that then we can find a solution but that will require offering `adjust(..)` interface for caller to fix the memory shift that has happened.
+The allocator does not support memory moves. Memory moves is a situation where an application creates a memory map at address `xyz` then restarts, then remap the same memory to a different address `xxz` essentially invalidating all the pointers in any in memory object graph including allocator own. For now we assume that apps will always remap at the same address. If and only if we find that apps are unable to always do that then we can find a solution but that will require offering `adjust(..)` interface for caller to fix the memory shift that has happened. For that reason we always used fixed maps in our examples
 
 
 ## Building & Testing
@@ -59,5 +60,3 @@ fmem_free(fm, my_mem);
 ```
 
 
-## Other Samples
-TODO (code samples runnable in the repo itself).

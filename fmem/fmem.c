@@ -200,6 +200,10 @@ struct fmem* fmem_create_new(void * on_mem, size_t length, uint32_t min_alloc, c
 	if (committer != NULL){
 		fm->committer = committer;
 	}
+
+	/* for rare cases where fmem left in locked state*/
+	fmem_unlock(fm);
+
   // create a second page (this is first empty massive page
   char * start = (char *) fpage_head;
   struct fmem_page *main_fpage = (struct fmem_page *) (start + fpage_head->size);
@@ -400,7 +404,7 @@ int64_t fmem_commit_user_data(struct fmem *fm){
 
 	// we don't need to lock here
 	struct commit_range r = {0};
-	r.start = (void *) fm->user1;
+	r.start = (void *) &fm->user1;
 	r.len = 4 * sizeof(fm->user1);
 	if (fm->committer(&r, 1) < 0) return E_COMMIT_FAILED;
 
@@ -416,12 +420,14 @@ int64_t fmem_commit_mem(struct fmem *fm, void *mem, uint32_t len){
   int64_t check = fail_on_poison_check(fpage_get_magic(fpage), POISON, "committing user memory");
   if( check != 0) return check;
 
+
 	uint32_t page_size = fpage_actual(fpage);
 	if (len == 0){
 		len = page_size; // if no len then
-	}else{
-		if ( ((char *) mem + len) > ((char *) fpage +  page_size)) return E_COMMIT_FAILED;
 	}
+	// weather len is supplied or not, it must fit page boundries
+	if ( ((char *) mem + len) > ((char *) fpage + PAGE_OVERHEAD +  page_size)) return E_COMMIT_FAILED;
+
 
 	struct commit_range r = {0};
 	r.start = mem;
@@ -542,7 +548,7 @@ static MunitResult test_fmem_commit(const MunitParameter params[], void* data){
 	reset_test_committer();
 	fm->committer = test_committer;
 	munit_assert(fmem_commit_user_data(fm) > 0 );
-	compare_ranges[0].start = fm->user1;
+	compare_ranges[0].start = &fm->user1;
 	compare_ranges[0].len = 4 * sizeof(fm->user1);
 	compare_res = test_committer_compare_to(compare_ranges, 1, false);
 	if (compare_res != MUNIT_OK) return compare_res;
